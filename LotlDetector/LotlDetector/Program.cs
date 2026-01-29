@@ -1,74 +1,60 @@
-﻿// See https://aka.ms/new-console-template for more information
-//Console.WriteLine("Hello, World!");
-
-using Microsoft.Diagnostics.Tracing.Parsers;
+﻿using Microsoft.Diagnostics.Tracing.Parsers;
 using Microsoft.Diagnostics.Tracing.Session;
-using System.Collections.Concurrent;
+using LotlDetector;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography.X509Certificates;
 
-//Process Map (Memory the name)
-ConcurrentDictionary<int, string> processMap = new ConcurrentDictionary<int, string>();
+var mapper = new ProcessMapper();
+var analyzer = new Analyzer();
+string sessionName = "LotL-EDR";
 
-foreach (var p in System.Diagnostics.Process.GetProcesses())
-{
-    processMap[p.Id] = p.ProcessName;
-}
-
-string sessionName = "Advanced-EDR_Session";
-
+//커널 이벤트 세션 
 using (var session = new TraceEventSession(sessionName))
 {
     session.EnableKernelProvider(KernelTraceEventParser.Keywords.Process);
-    session.Source.Kernel.ProcessStart += (data) =>
+
+    session.Source.Kernel.ProcessStart += (Data) =>
     {
-        //new Process
-        processMap[data.ProcessID] = data.ImageFileName;
+        mapper.Add(Data.ProcessID, Data.ImageFileName);
+        string pName = mapper.GetParentName(Data.ParentID);
 
-        //ParentName , trygetvalue() => 지정한 키와 연결된 값을 가져옴 
-        processMap.TryGetValue(data.ParentID, out string parentName);
-        parentName ??= "Unknown/Terminared";
+        int score = analyzer.CalculateScore(Data.ImageFileName, pName, Data.CommandLine, out List<string> reasons);
+        string decodedCmd = analyzer.DecodePowerShell(Data.CommandLine);
 
-        //Danger Score
-        int riskScore = 0;
-        List<string> detectionReasons = new List<string>();
-
-        string cmd = data.CommandLine?.ToLower() ?? "";
-        string img = data.ImageFileName.ToLower();
-        string pName = parentName.ToLower();
-
-        //위험한 부모와 자식관계
-        if ((pName.Contains("winword") || pName.Contains("excel")) && (img.Contains("powershell") || img.Contains("cmd")))
+        if (score > 0)
         {
-            riskScore += 60;
-            detectionReasons.Add("Office document spawns a shell");
-        }
-
-        // 인코딩된 명령어 
-        if (cmd.Contains("-enc") || cmd.Contains("-encodedcommand"))
-        {
-            riskScore += 40;
-            detectionReasons.Add("Encoded command Line detected");
-        }
-
-        // 외부 파일 다운시도  
-        if (cmd.Contains("downloadstring") || cmd.Contains("http") || img.Contains("certutil"))
-        {
-            riskScore += 50;
-            detectionReasons.Add("External Download attempt detected");
-        }
-
-        //detection score result
-        if (riskScore > 0)
-        {
-            PrintDetection(data, parentName, riskScore, detectionReasons);
+            PrintAlert(Data.ImageFileName, pName, Data.CommandLine, decodedCmd, score, reasons);
         }
     };
 
     session.Source.Kernel.ProcessStop += (data) =>
     {
-        processMap.TryRemove(data.ProcessID, out _);
+        mapper.Remove(data.ProcessID);
     };
 
-    Console.WriteLine("LotL Detection is running");
+    Console.WriteLine("Monitoring...");
     session.Source.Process();
+}
+
+static void PrintAlert(string img, string parent, string cmd, string decoded, int score, List<string> reasons)
+{
+    Console.ForegroundColor = score >= 80 ? ConsoleColor.Red : ConsoleColor.Yellow;
+    Console.WriteLine($"Detection : Score : {score}");
+    Console.ResetColor();
+
+    Console.WriteLine($"Process : {img}");
+    Console.WriteLine($"Parent : {parent}");
+    Console.WriteLine($"cmd : {cmd}");
+
+    if(!string.IsNullOrEmpty(decoded)){
+        Console.ForegroundColor = ConsoleColor.Cyan;
+        Console.WriteLine($"decoding result = {decoded}");
+        Console.ResetColor();
+    }
+
+    Console.WriteLine("Detection Source");
+    foreach (var r in reasons) Console.WriteLine($"    L {r}");
+    Console.WriteLine(new string('-', 50));
+    
 }
 
